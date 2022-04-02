@@ -27,6 +27,7 @@
 #include "openxr/openxr_platform.h"
 #include "openxr/openxr_reflection.h"
 
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -1614,6 +1615,171 @@ static bool program_initialize_swapchains(OpenXrProgram* program, VulkanState* v
     return true;
 }
 
+static XrEventDataBaseHeader* program_try_next_event(OpenXrProgram* program, XrResult* xrResult) {
+    program->eventDataBuffer.type = XR_TYPE_EVENT_DATA_BUFFER;
+    *xrResult = xrPollEvent(program->instance, &program->eventDataBuffer);
+    if (*xrResult == XR_SUCCESS) {
+        if (program->eventDataBuffer.type == XR_TYPE_EVENT_DATA_EVENTS_LOST) {
+            XrEventDataEventsLost* event = (XrEventDataEventsLost*)&program->eventDataBuffer;
+            CWARN("%u events lost", event->lostEventCount);
+        }
+        return (XrEventDataBaseHeader*)&program->eventDataBuffer;
+    }
+
+    return 0;
+}
+
+static bool program_session_state_changed(OpenXrProgram* program, XrEventDataSessionStateChanged* event, bool* exitRenderLoop, bool* requestRestart) {
+    XrSessionState oldState = program->sessionState;
+    program->sessionState = event->state;
+
+    CINFO("XrEventDataSessionStateChanged: state %u -> %u, session=[%llu] time=[%lld]",
+          oldState, event->state, event->session, event->time);
+
+    if ((event->session != XR_NULL_HANDLE) && (event->session != program->session)) {
+        CERROR("XrEventDataSessionStateChanged for unknown session");
+        return false;
+    }
+
+    switch (program->sessionState) {
+        case XR_SESSION_STATE_READY: {
+            XrSessionBeginInfo sessionBI = {
+                .type = XR_TYPE_SESSION_BEGIN_INFO,
+                .primaryViewConfigurationType = program->viewConfigType};
+            XrResult result = xrBeginSession(program->session, &sessionBI);
+            CHECKXR(result, "Failed to begin session");
+            program->sessionRunning = true;
+        } break;
+        case XR_SESSION_STATE_STOPPING: {
+            if (program->session == XR_NULL_HANDLE) {
+                return false;
+            }
+            program->sessionRunning = false;
+            XrResult result = xrEndSession(program->sessionRunning);
+            CHECKXR(result, "Failed to end session");
+        } break;
+        case XR_SESSION_STATE_EXITING: {
+            *exitRenderLoop = true;
+            *requestRestart = false;
+        } break;
+        case XR_SESSION_STATE_LOSS_PENDING: {
+            *exitRenderLoop = true;
+            *requestRestart = true;
+        } break;
+        default:
+            break;
+    }
+
+    return true;
+}
+
+static bool program_poll_events(OpenXrProgram* program, bool* exitRenderLoop, bool* requestRestart) {
+    *exitRenderLoop = false;
+    *requestRestart = false;
+
+    XrResult result;
+    XrEventDataBaseHeader* event;
+    while (event = program_try_next_event(program, &result)) {
+        switch (event->type) {
+            case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: {
+                XrEventDataInstanceLossPending* e = (XrEventDataInstanceLossPending*)event;
+                CWARN("XrEventDataInstanceLossPending by %lld", e->lossTime);
+                *exitRenderLoop = true;
+                *requestRestart = true;
+            } break;
+            case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED: {
+                XrEventDataSessionStateChanged* e = (XrEventDataSessionStateChanged*)event;
+                return program_session_state_changed(program, e, exitRenderLoop, requestRestart);
+            } break;
+            case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED: {
+                // TODO: LogActionSourceName(m_input.grabAction, "Grab");
+                // TODO: LogActionSourceName(m_input.quitAction, "Quit");
+                // TODO: LogActionSourceName(m_input.poseAction, "Pose");
+                // TODO: LogActionSourceName(m_input.vibrateAction, "Vibrate");
+            } break;
+            case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+            default: {
+                CTRACE("Ignoring event type: %u", event->type);
+            } break;
+        }
+    }
+    CHECKXR(result, "Error during event polling");
+    return true;
+}
+
+static bool program_poll_actions(OpenXrProgram* program) {
+    program->input.handActive[0] = XR_FALSE;
+    program->input.handActive[1] = XR_FALSE;
+
+    XrActiveActionSet activeActionSet = {
+        .actionSet = program->input.actionsSet,
+        .subactionPath = XR_NULL_PATH};
+
+    XrActionsSyncInfo syncInfo = {
+        .type = XR_TYPE_ACTIONS_SYNC_INFO,
+        .countActiveActionSets = 1,
+        .activeActionSets = &activeActionSet};
+
+    XrResult result = xrSyncActions(program->session, &syncInfo);
+    CHECKXR(result, "Failed to Sync actions");
+
+    for (uint32_t hand = 0; hand < SIDE_COUNT; ++hand) {
+        XrActionStateGetInfo getInfo = {
+            .type = XR_TYPE_ACTION_STATE_GET_INFO,
+            .action = program->input.grabAction,
+            .subactionPath = program->input.handSubActionPath[hand]};
+
+        XrActionStateFloat grabValue = {
+            .type = XR_TYPE_ACTION_STATE_FLOAT};
+
+        result = xrGetActionStateFloat(program->session, &getInfo, &grabValue);
+        CHECKXR(result, "Failed to get grab value [%u]", hand);
+
+        if (grabValue.isActive == XR_TRUE) {
+            program->input.handScale[hand] = 1.0f - 0.5f * grabValue.currentState;
+            if (grabValue.currentState > 0.9f) {
+                XrHapticVibration vibration = {
+                    .type = XR_TYPE_HAPTIC_VIBRATION,
+                    .amplitude = 1.0f,
+                    .duration = XR_MIN_HAPTIC_DURATION,
+                    .frequency = XR_FREQUENCY_UNSPECIFIED};
+
+                XrHapticActionInfo hapticActionInfo = {
+                    .type = XR_TYPE_HAPTIC_ACTION_INFO,
+                    .action = program->input.vibrateAction,
+                    .subactionPath = program->input.handSubActionPath[hand]};
+
+                result = xrApplyHapticFeedback(program->session, &hapticActionInfo, (XrHapticBaseHeader*)&vibration);
+                CHECKXR(result, "Failed to apply haptic feedback [%u]", hand);
+            }
+        }
+        getInfo.action = program->input.poseAction;
+        XrActionStatePose poseState = {
+            .type = XR_TYPE_ACTION_STATE_POSE};
+
+        result = xrGetActionStatePose(program->session, &getInfo, &poseState);
+        CHECKXR(result, "Failed to get hand pose state [%u]", hand);
+        program->input.handActive[hand] = poseState.isActive;
+    }
+
+    XrActionStateGetInfo getInfo = {
+        .type = XR_TYPE_ACTION_STATE_GET_INFO,
+        .action = program->input.quitAction};
+    XrActionStateBoolean quitValue = {
+        .type = XR_TYPE_ACTION_STATE_BOOLEAN};
+
+    result = xrGetActionStateBoolean(program->session, &getInfo, &quitValue);
+    CHECKXR(result, "Failed to get quit action value");
+    if ((quitValue.isActive == XR_TRUE) && (quitValue.changedSinceLastSync = XR_TRUE) && (quitValue.currentState == XR_TRUE)) {
+        result = xrRequestExitSession(program->session);
+        CHECKXR(result, "Failed to request quit session");
+    }
+}
+
+static bool program_render_frame(OpenXrProgram* program, VulkanState* vulkan) {
+    // TODO: program->RenderFrame();
+}
+
 void android_main(struct android_app* app) {
     JNIEnv* env;
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &env, 0);
@@ -1628,8 +1794,8 @@ void android_main(struct android_app* app) {
         .applicationVM = app->activity->vm,
         .applicationActivity = app->activity->clazz};
 
-    bool requestRestart = false;
-    bool exitRenderLoop = false;
+    bool requestRestart = false;  // TODO: remove?
+    bool exitRenderLoop = false;  // TODO: remove?
 
     VulkanState vulkan = {};
     for (uint32_t i = 0; i < NUM_VIEWES; ++i) {
@@ -1684,17 +1850,24 @@ void android_main(struct android_app* app) {
                 }
             }
 
-            // TODO: program->PollEvents(&exitRenderLoop, &requestRestart);
-            // TODO: if (!program->IsSessionRunning()) {
-            // TODO:     // Throttle loop since xrWaitFrame won't be called.
-            // TODO:     std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            // TODO:     continue;
-            // TODO: }
+            if (!program_poll_events(&program, &exitRenderLoop, &requestRestart)) {
+                exitRenderLoop = true;
+                requestRestart = true;
+            }
+            if (!program.sessionRunning) {
+                usleep(250000);
+                continue;
+            }
 
-            // TODO: program->PollActions();
+            if (!program_poll_actions(&program)) {
+                CERROR("Failed to poll actions");
+                exitRenderLoop = true;
+            }
+
             // TODO: program->RenderFrame();
         }
     }
 
+    // TODO: cleanup
     (*app->activity->vm)->DetachCurrentThread(app->activity->vm);
 }
