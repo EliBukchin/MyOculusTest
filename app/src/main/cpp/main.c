@@ -72,8 +72,6 @@ typedef struct AndroidAppState {
 } AndroidAppState;
 
 typedef struct RenderTarget {
-    VkImage colorImage;
-    VkImage depthImage;
     VkImageView colorView;
     VkImageView depthView;
     VkFramebuffer fb;
@@ -255,6 +253,11 @@ typedef struct Vertex {
     XrVector3f color;
 } Vertex;
 
+typedef struct Cube {
+    XrPosef pose;
+    XrVector3f scale;
+} Cube;
+
 #define Red \
     { 1, 0, 0 }
 #define DarkRed \
@@ -327,6 +330,171 @@ static XrPosef pose_rotateCCW_about_Yaxis(float radians, XrVector3f translation)
     result.orientation.w = cosf(radians * 0.5f);
     result.position = translation;
     return result;
+}
+
+typedef struct XrMatrix4x4f {
+    float m[16];
+} XrMatrix4x4f;
+
+static void mat_create_scale(XrMatrix4x4f* mat, float x, float y, float z) {
+    mat->m[0] = x;
+    mat->m[1] = 0.0f;
+    mat->m[2] = 0.0f;
+    mat->m[3] = 0.0f;
+    mat->m[4] = 0.0f;
+    mat->m[5] = y;
+    mat->m[6] = 0.0f;
+    mat->m[7] = 0.0f;
+    mat->m[8] = 0.0f;
+    mat->m[9] = 0.0f;
+    mat->m[10] = z;
+    mat->m[11] = 0.0f;
+    mat->m[12] = 0.0f;
+    mat->m[13] = 0.0f;
+    mat->m[14] = 0.0f;
+    mat->m[15] = 1.0f;
+}
+
+static void mat_create_proj(XrMatrix4x4f* mat, XrFovf fov, float near, float far) {
+    float tanL = tanf(fov.angleLeft);
+    float tanR = tanf(fov.angleRight);
+    float tanD = tanf(fov.angleDown);
+    float tanU = tanf(fov.angleUp);
+
+    float tanW = tanR - tanL;
+    float tanH = tanD - tanU;
+
+    mat->m[0] = 2.0f / tanW;
+    mat->m[4] = 0.0f;
+    mat->m[8] = (tanR + tanL) / tanW;
+    mat->m[12] = 0.0f;
+
+    mat->m[1] = 0.0f;
+    mat->m[5] = 2.0f / tanH;
+    mat->m[9] = (tanU + tanD) / tanH;
+    mat->m[13] = 0.0f;
+
+    mat->m[2] = 0.0f;
+    mat->m[6] = 0.0f;
+    mat->m[10] = -far / (far - near);
+    mat->m[14] = -far * near / (far - near);
+
+    mat->m[3] = 0.0f;
+    mat->m[7] = 0.0f;
+    mat->m[11] = -1.0f;
+    mat->m[15] = 0.0f;
+}
+
+static void mat_from_quat(XrMatrix4x4f* mat, XrQuaternionf* quat) {
+    float x2 = quat->x + quat->x;
+    float y2 = quat->y + quat->y;
+    float z2 = quat->z + quat->z;
+
+    float xx2 = quat->x * x2;
+    float yy2 = quat->y * y2;
+    float zz2 = quat->z * z2;
+
+    float yz2 = quat->y * z2;
+    float wx2 = quat->w * x2;
+    float xy2 = quat->x * y2;
+    float wz2 = quat->w * z2;
+    float xz2 = quat->x * z2;
+    float wy2 = quat->w * y2;
+
+    mat->m[0] = 1.0f - yy2 - zz2;
+    mat->m[1] = xy2 + wz2;
+    mat->m[2] = xz2 - wy2;
+    mat->m[3] = 0.0f;
+
+    mat->m[4] = xy2 - wz2;
+    mat->m[5] = 1.0f - xx2 - zz2;
+    mat->m[6] = yz2 + wx2;
+    mat->m[7] = 0.0f;
+
+    mat->m[8] = xz2 + wy2;
+    mat->m[9] = yz2 - wx2;
+    mat->m[10] = 1.0f - xx2 - yy2;
+    mat->m[11] = 0.0f;
+
+    mat->m[12] = 0.0f;
+    mat->m[13] = 0.0f;
+    mat->m[14] = 0.0f;
+    mat->m[15] = 1.0f;
+}
+
+static void mat_create_translation(XrMatrix4x4f* mat, float x, float y, float z) {
+    mat->m[0] = 1.0f;
+    mat->m[1] = 0.0f;
+    mat->m[2] = 0.0f;
+    mat->m[3] = 0.0f;
+    mat->m[4] = 0.0f;
+    mat->m[5] = 1.0f;
+    mat->m[6] = 0.0f;
+    mat->m[7] = 0.0f;
+    mat->m[8] = 0.0f;
+    mat->m[9] = 0.0f;
+    mat->m[10] = 1.0f;
+    mat->m[11] = 0.0f;
+    mat->m[12] = x;
+    mat->m[13] = y;
+    mat->m[14] = z;
+    mat->m[15] = 1.0f;
+}
+
+static void mat_mul(XrMatrix4x4f* mat, const XrMatrix4x4f* a, const XrMatrix4x4f* b) {
+    mat->m[0] = a->m[0] * b->m[0] + a->m[4] * b->m[1] + a->m[8] * b->m[2] + a->m[12] * b->m[3];
+    mat->m[1] = a->m[1] * b->m[0] + a->m[5] * b->m[1] + a->m[9] * b->m[2] + a->m[13] * b->m[3];
+    mat->m[2] = a->m[2] * b->m[0] + a->m[6] * b->m[1] + a->m[10] * b->m[2] + a->m[14] * b->m[3];
+    mat->m[3] = a->m[3] * b->m[0] + a->m[7] * b->m[1] + a->m[11] * b->m[2] + a->m[15] * b->m[3];
+
+    mat->m[4] = a->m[0] * b->m[4] + a->m[4] * b->m[5] + a->m[8] * b->m[6] + a->m[12] * b->m[7];
+    mat->m[5] = a->m[1] * b->m[4] + a->m[5] * b->m[5] + a->m[9] * b->m[6] + a->m[13] * b->m[7];
+    mat->m[6] = a->m[2] * b->m[4] + a->m[6] * b->m[5] + a->m[10] * b->m[6] + a->m[14] * b->m[7];
+    mat->m[7] = a->m[3] * b->m[4] + a->m[7] * b->m[5] + a->m[11] * b->m[6] + a->m[15] * b->m[7];
+
+    mat->m[8] = a->m[0] * b->m[8] + a->m[4] * b->m[9] + a->m[8] * b->m[10] + a->m[12] * b->m[11];
+    mat->m[9] = a->m[1] * b->m[8] + a->m[5] * b->m[9] + a->m[9] * b->m[10] + a->m[13] * b->m[11];
+    mat->m[10] = a->m[2] * b->m[8] + a->m[6] * b->m[9] + a->m[10] * b->m[10] + a->m[14] * b->m[11];
+    mat->m[11] = a->m[3] * b->m[8] + a->m[7] * b->m[9] + a->m[11] * b->m[10] + a->m[15] * b->m[11];
+
+    mat->m[12] = a->m[0] * b->m[12] + a->m[4] * b->m[13] + a->m[8] * b->m[14] + a->m[12] * b->m[15];
+    mat->m[13] = a->m[1] * b->m[12] + a->m[5] * b->m[13] + a->m[9] * b->m[14] + a->m[13] * b->m[15];
+    mat->m[14] = a->m[2] * b->m[12] + a->m[6] * b->m[13] + a->m[10] * b->m[14] + a->m[14] * b->m[15];
+    mat->m[15] = a->m[3] * b->m[12] + a->m[7] * b->m[13] + a->m[11] * b->m[14] + a->m[15] * b->m[15];
+}
+
+static void mat_invert(XrMatrix4x4f* out, XrMatrix4x4f* src) {
+    out->m[0] = src->m[0];
+    out->m[1] = src->m[4];
+    out->m[2] = src->m[8];
+    out->m[3] = 0.0f;
+    out->m[4] = src->m[1];
+    out->m[5] = src->m[5];
+    out->m[6] = src->m[9];
+    out->m[7] = 0.0f;
+    out->m[8] = src->m[2];
+    out->m[9] = src->m[6];
+    out->m[10] = src->m[10];
+    out->m[11] = 0.0f;
+    out->m[12] = -(src->m[0] * src->m[12] + src->m[1] * src->m[13] + src->m[2] * src->m[14]);
+    out->m[13] = -(src->m[4] * src->m[12] + src->m[5] * src->m[13] + src->m[6] * src->m[14]);
+    out->m[14] = -(src->m[8] * src->m[12] + src->m[9] * src->m[13] + src->m[10] * src->m[14]);
+    out->m[15] = 1.0f;
+}
+
+static void mat_create_translation_rotation_scale(XrMatrix4x4f* mat, XrVector3f* translation, XrQuaternionf* rotation, XrVector3f* scale) {
+    XrMatrix4x4f scaleMatrix;
+    mat_create_scale(&scaleMatrix, scale->x, scale->y, scale->z);
+
+    XrMatrix4x4f rotationMatrix;
+    mat_from_quat(&rotationMatrix, rotation);
+
+    XrMatrix4x4f translationMatrix;
+    mat_create_translation(&translationMatrix, translation->x, translation->y, translation->z);
+
+    XrMatrix4x4f combinedMatrix;
+    mat_mul(&combinedMatrix, &rotationMatrix, &scaleMatrix);
+    mat_mul(mat, &translationMatrix, &combinedMatrix);
 }
 
 typedef struct CmdBuffer {
@@ -746,11 +914,11 @@ static bool vulkan_initialize_device(OpenXrProgram* program, VulkanState* vulkan
                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
         .pfnUserCallback = vulkan_debug_callback};
     {
-        VkBaseInStructure** next = (VkBaseInStructure**)&instanceCI.pNext;
+        const VkBaseInStructure** next = (const VkBaseInStructure**)&instanceCI.pNext;
         while (*next) {
-            next = &(*next)->pNext;
+            next = (const VkBaseInStructure**)(&(*next)->pNext);
         }
-        *next = &debugUtilsCI;
+        *next = (const VkBaseInStructure*)&debugUtilsCI;
     }
 #endif
 
@@ -1182,31 +1350,31 @@ static XrReferenceSpaceCreateInfo program_ref_space_ci(char* ref) {
         .type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
         .poseInReferenceSpace = pose_identity()};
 
-    if (strcasecmp(ref, "View")) {
+    if (strcasecmp(ref, "View") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
-    } else if (strcasecmp(ref, "ViewFront")) {
+    } else if (strcasecmp(ref, "ViewFront") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
         result.poseInReferenceSpace = pose_translation((XrVector3f){0.f, 0.f, -2.f});
-    } else if (strcasecmp(ref, "Local")) {
+    } else if (strcasecmp(ref, "Local") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
-    } else if (strcasecmp(ref, "Stage")) {
+    } else if (strcasecmp(ref, "Stage") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
-    } else if (strcasecmp(ref, "StageLeft")) {
+    } else if (strcasecmp(ref, "StageLeft") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
         result.poseInReferenceSpace = pose_rotateCCW_about_Yaxis(
             0.0f,
             (XrVector3f){-2.f, 0.f, -2.f});
-    } else if (strcasecmp(ref, "StageRight")) {
+    } else if (strcasecmp(ref, "StageRight") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
         result.poseInReferenceSpace = pose_rotateCCW_about_Yaxis(
             0.0f,
             (XrVector3f){2.f, 0.f, -2.f});
-    } else if (strcasecmp(ref, "StageLeftRotated")) {
+    } else if (strcasecmp(ref, "StageLeftRotated") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
         result.poseInReferenceSpace = pose_rotateCCW_about_Yaxis(
             3.14f / 3.0f,
             (XrVector3f){-2.f, 0.f, -2.f});
-    } else if (strcasecmp(ref, "StageRightRotated")) {
+    } else if (strcasecmp(ref, "StageRightRotated") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
         result.poseInReferenceSpace = pose_rotateCCW_about_Yaxis(
             -3.14f / 3.0f,
@@ -1275,7 +1443,7 @@ static bool program_initialize_session(OpenXrProgram* program) {
     return true;
 }
 
-static int16_t vulkan_select_swapchain_format(int16_t* formats, uint32_t formatCount) {
+static int16_t vulkan_select_swapchain_format(int64_t* formats, uint32_t formatCount) {
     int64_t supported[] = {
         VK_FORMAT_B8G8R8A8_SRGB,
         VK_FORMAT_R8G8B8A8_SRGB,
@@ -1393,7 +1561,7 @@ static bool vulkan_pipeline_create(VulkanState* vulkan, VkExtent2D extent, Rende
         .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &vulkan->drawBuffer.bindDesc,
         .vertexAttributeDescriptionCount = array_size(vulkan->drawBuffer.attrDesc),
-        .pVertexAttributeDescriptions = &vulkan->drawBuffer.attrDesc};
+        .pVertexAttributeDescriptions = vulkan->drawBuffer.attrDesc};
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembleCI = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1569,7 +1737,7 @@ static bool program_initialize_swapchains(OpenXrProgram* program, VulkanState* v
         }
         program->colorSwapchainFormat = vulkan_select_swapchain_format(formats, formatCount);
         // TODO: Print swapchain formats and the selected one.
-        CINFO("Selected swapchain format: %d", program->colorSwapchainFormat);
+        CINFO("Selected swapchain format: %lld", program->colorSwapchainFormat);
         free(formats);
 
         // NOTE: create swapchain
@@ -1679,7 +1847,7 @@ static bool program_poll_events(OpenXrProgram* program, bool* exitRenderLoop, bo
 
     XrResult result;
     XrEventDataBaseHeader* event;
-    while (event = program_try_next_event(program, &result)) {
+    while ((event = program_try_next_event(program, &result))) {
         switch (event->type) {
             case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: {
                 XrEventDataInstanceLossPending* e = (XrEventDataInstanceLossPending*)event;
@@ -1774,10 +1942,405 @@ static bool program_poll_actions(OpenXrProgram* program) {
         result = xrRequestExitSession(program->session);
         CHECKXR(result, "Failed to request quit session");
     }
+
+    return true;
+}
+
+static bool vulkan_commandbuffer_reset(VulkanState* vulkan) {
+    if (vulkan->cmdBuffer.state != CBR_STATE_Initialized) {
+        if (vulkan->cmdBuffer.state != CBR_STATE_Executable) {
+            CERROR("Command buffer in unexpected state");
+            return false;
+        }
+        VkResult result = vkResetFences(vulkan->device, 1, &vulkan->cmdBuffer.execFence);
+        CHECKVK(result, "Failed to reset exec fence");
+        result = vkResetCommandBuffer(vulkan->cmdBuffer.buf, 0);
+        CHECKVK(result, "Failed to reset commandbuffer");
+
+        vulkan->cmdBuffer.state = CBR_STATE_Initialized;
+    }
+    return true;
+}
+
+static bool vulkan_commandbuffer_begin(VulkanState* vulkan) {
+    if (vulkan->cmdBuffer.state != CBR_STATE_Initialized) {
+        CERROR("Command buffer in unexpected state");
+        return false;
+    }
+    VkCommandBufferBeginInfo cmdBeginInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkResult result = vkBeginCommandBuffer(vulkan->cmdBuffer.buf, &cmdBeginInfo);
+    CHECKVK(result, "Failed to begin cbr");
+    vulkan->cmdBuffer.state = CBR_STATE_Recording;
+
+    return true;
+}
+
+static bool vulkan_commandbuffer_end(VulkanState* vulkan) {
+    if (vulkan->cmdBuffer.state != CBR_STATE_Recording) {
+        CERROR("Command buffer in unexpected state");
+        return false;
+    }
+    VkResult result = vkEndCommandBuffer(vulkan->cmdBuffer.buf);
+    CHECKVK(result, "Failed to end cbr");
+    vulkan->cmdBuffer.state = CBR_STATE_Executable;
+    return true;
+}
+
+static bool vulkan_commandbuffer_exec(VulkanState* vulkan) {
+    if (vulkan->cmdBuffer.state != CBR_STATE_Executable) {
+        CERROR("Command buffer in unexpected state");
+        return false;
+    }
+    VkSubmitInfo submitInfo = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &vulkan->cmdBuffer.buf};
+    VkResult result = vkQueueSubmit(vulkan->queue, 1, &submitInfo, vulkan->cmdBuffer.execFence);
+    CHECKVK(result, "Failed to Submit queue");
+    vulkan->cmdBuffer.state = CBR_STATE_Executing;
+    return true;
+}
+
+static bool vulkan_commandbuffer_wait(VulkanState* vulkan) {
+    if (vulkan->cmdBuffer.state == CBR_STATE_Initialized) {
+        return true;
+    }
+    if (vulkan->cmdBuffer.state != CBR_STATE_Executing) {
+        CERROR("Command buffer in unexpected state");
+        return false;
+    }
+    uint32_t timeoutNs = 1 * 1000 * 1000 * 1000;
+    for (uint32_t i = 0; i < 5; ++i) {
+        VkResult result = vkWaitForFences(vulkan->device, 1, &vulkan->cmdBuffer.execFence, VK_TRUE, timeoutNs);
+        if (result == VK_SUCCESS) {
+            vulkan->cmdBuffer.state = CBR_STATE_Executable;
+            return true;
+        }
+        CWARN("WAit for CBR timed out");
+    }
+    return false;
+}
+
+static void vulkan_depthbuffer_transition(VkCommandBuffer cbr, DepthBuffer* buf, VkImageLayout taget) {
+    if (buf->vkLayout == taget) {
+        return;
+    }
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        .oldLayout = buf->vkLayout,
+        .newLayout = taget,
+        .image = buf->depthImage,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1}};
+
+    vkCmdPipelineBarrier(cbr, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 0, 0, 0, 0, 1, &barrier);
+    buf->vkLayout = taget;
+}
+
+static bool vulkan_create_render_target(VulkanState* vulkan, uint32_t view, uint32_t image) {
+    VkImageView attachments[2];
+    uint32_t attachmantCount = 0;
+    if (vulkan->swapchainImageContext[view].swapchainImages[image].image != VK_NULL_HANDLE) {
+        VkImageViewCreateInfo viewCI = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = vulkan->swapchainImageContext[view].swapchainImages[image].image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = vulkan->swapchainImageContext[view].rp.colorFmt,
+            .components.r = VK_COMPONENT_SWIZZLE_R,
+            .components.g = VK_COMPONENT_SWIZZLE_G,
+            .components.b = VK_COMPONENT_SWIZZLE_B,
+            .components.a = VK_COMPONENT_SWIZZLE_A,
+            .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .subresourceRange.baseMipLevel = 0,
+            .subresourceRange.levelCount = 1,
+            .subresourceRange.baseArrayLayer = 0,
+            .subresourceRange.layerCount = 1};
+        VkResult result = vkCreateImageView(vulkan->device, &viewCI, 0, &vulkan->swapchainImageContext[view].renderTarget[image].colorView);
+        CHECKVK(result, "Failed to create Image view %u:%u", view, image);
+        attachments[attachmantCount++] = vulkan->swapchainImageContext[view].renderTarget[image].colorView;
+    }
+
+    if (vulkan->swapchainImageContext[view].depthBuffer.depthImage != VK_NULL_HANDLE) {
+        VkImageViewCreateInfo viewCI = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = vulkan->swapchainImageContext[view].depthBuffer.depthImage,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = vulkan->swapchainImageContext[view].rp.depthFmt,
+            .components.r = VK_COMPONENT_SWIZZLE_R,
+            .components.g = VK_COMPONENT_SWIZZLE_G,
+            .components.b = VK_COMPONENT_SWIZZLE_B,
+            .components.a = VK_COMPONENT_SWIZZLE_A,
+            .subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .subresourceRange.baseMipLevel = 0,
+            .subresourceRange.levelCount = 1,
+            .subresourceRange.baseArrayLayer = 0,
+            .subresourceRange.layerCount = 1,
+        };
+        VkResult result = vkCreateImageView(vulkan->device, &viewCI, 0, &vulkan->swapchainImageContext[view].renderTarget[image].depthView);
+        CHECKVK(result, "Failed to create depth view %u:%u", view, image);
+        attachments[attachmantCount++] = vulkan->swapchainImageContext[view].renderTarget[image].depthView;
+    }
+
+    VkFramebufferCreateInfo fbCI = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .attachmentCount = attachmantCount,
+        .pAttachments = attachments,
+        .renderPass = vulkan->swapchainImageContext[view].rp.pass,
+        .width = vulkan->swapchainImageContext[view].size.width,
+        .height = vulkan->swapchainImageContext[view].size.height,
+        .layers = 1};
+    VkResult result = vkCreateFramebuffer(vulkan->device, &fbCI, 0, &vulkan->swapchainImageContext[view].renderTarget[image].fb);
+    CHECKVK(result, "Failed to create frame buffer %u:%u", view, image);
+    return true;
+}
+
+static bool vulkan_render_view(VulkanState* vulkan, XrCompositionLayerProjectionView view, uint32_t swapchainIndex, uint32_t image, Cube* cubes, uint32_t cubeCount) {
+    SwapchainImageContext* context = &vulkan->swapchainImageContext[swapchainIndex];
+
+    if (!vulkan_commandbuffer_reset(vulkan)) {
+        CERROR("Faield to reset command buffer");
+        return false;
+    }
+
+    if (!vulkan_commandbuffer_begin(vulkan)) {
+        CERROR("Faield to begin command buffer");
+        return false;
+    }
+
+    vulkan_depthbuffer_transition(vulkan->cmdBuffer.buf, &context->depthBuffer, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+    VkClearValue clearValues[] = {
+        {.color = {0.184313729f, 0.309803933f, 0.309803933f, 1.0f}},
+        {.depthStencil = {.depth = 1.0f, .stencil = 0}}};
+
+    if (!context->renderTarget[image].fb) {
+        if (!vulkan_create_render_target(vulkan, swapchainIndex, image)) {
+            CERROR("Fauled to create render target %u:%u", swapchainIndex, image);
+            return false;
+        }
+    }
+
+    VkRenderPassBeginInfo rpBI = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .clearValueCount = array_size(clearValues),
+        .pClearValues = clearValues,
+        .renderPass = context->rp.pass,
+        .framebuffer = context->renderTarget[image].fb,
+        .renderArea = {
+            .offset = {0, 0},
+            .extent = context->size}};
+
+    vkCmdBeginRenderPass(vulkan->cmdBuffer.buf, &rpBI, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(vulkan->cmdBuffer.buf, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipe.pipe);
+    vkCmdBindIndexBuffer(vulkan->cmdBuffer.buf, vulkan->drawBuffer.idxBuf, 0, VK_INDEX_TYPE_UINT16);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(vulkan->cmdBuffer.buf, 0, 1, &vulkan->drawBuffer.vtxBuf, &offset);
+
+    XrPosef pose = view.pose;
+    XrMatrix4x4f proj;
+    mat_create_proj(&proj, view.fov, 0.05f, 100.0f);
+    XrMatrix4x4f toView;
+    XrVector3f scale = {1.f, 1.f, 1.f};
+    mat_create_translation_rotation_scale(&toView, &pose.position, &pose.orientation, &scale);
+    XrMatrix4x4f viewMAt;
+    mat_invert(&viewMAt, &toView);
+    XrMatrix4x4f vp;
+    mat_mul(&vp, &proj, &viewMAt);
+
+    for (uint32_t i = 0; i < cubeCount; ++i) {
+        XrMatrix4x4f model;
+        mat_create_translation_rotation_scale(&model, &cubes[i].pose.position, &cubes[i].pose.orientation, &cubes[i].scale);
+        XrMatrix4x4f mvp;
+        mat_mul(&mvp, &vp, &model);
+        vkCmdPushConstants(vulkan->cmdBuffer.buf, vulkan->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mvp.m), &mvp.m[0]);
+        vkCmdDrawIndexed(vulkan->cmdBuffer.buf, vulkan->drawBuffer.idxCount, 1, 0, 0, 0);
+    }
+
+    vkCmdEndRenderPass(vulkan->cmdBuffer.buf);
+
+    if (!vulkan_commandbuffer_end(vulkan)) {
+        CERROR("Faield to end command buffer");
+        return false;
+    }
+
+    if (!vulkan_commandbuffer_exec(vulkan)) {
+        CERROR("Faield to exec command buffer");
+        return false;
+    }
+
+    if (!vulkan_commandbuffer_wait(vulkan)) {
+        CERROR("Faield to wait for command buffer");
+        return false;
+    }
+    return true;
+}
+
+static bool program_render_layer(
+    OpenXrProgram* program,
+    VulkanState* vulkan,
+    XrTime dt,
+    XrCompositionLayerProjectionView* views,
+    uint32_t viewCountIn,
+    XrCompositionLayerProjection* layer) {
+    XrViewState viewState = {
+        .type = XR_TYPE_VIEW_STATE};
+
+    XrViewLocateInfo viewLocateInfo = {
+        .type = XR_TYPE_VIEW_LOCATE_INFO,
+        .viewConfigurationType = program->viewConfigType,
+        .displayTime = dt,
+        .space = program->space};
+    uint32_t viewCount;
+
+    XrResult result = xrLocateViews(
+        program->session,
+        &viewLocateInfo,
+        &viewState,
+        viewCountIn,
+        &viewCount,
+        program->views);
+    CHECKXR(result, "Falied to locate views");
+
+    if ((viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0 ||
+        (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0) {
+        CWARN("No valid tracking pose");
+        return false;
+    }
+
+    if (viewCountIn != viewCount) {
+        CERROR("Viewcount don't match");
+        return false;
+    }
+
+    uint32_t cubeCount;
+    Cube cubes[array_size(VISULAIZED_SPACES) + SIDE_COUNT];
+
+    for (uint32_t i = 0; i < array_size(VISULAIZED_SPACES); ++i) {
+        XrSpaceLocation spaceLocation = {
+            .type = XR_TYPE_SPACE_LOCATION};
+        result = xrLocateSpace(program->visualizedSpaces[i], program->space, dt, &spaceLocation);
+        CHECKXR(result, "Failed to locate space %u", i);
+        if (XR_UNQUALIFIED_SUCCESS(result)) {
+            if ((spaceLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
+                (spaceLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
+                cubes[cubeCount++] = (Cube){
+                    .pose = spaceLocation.pose,
+                    .scale = {0.25f, 0.25f, 0.25f}};
+            }
+        } else {
+            CTRACE("Unable to locate visualized ref space %u [code: %d]", i, result);
+        }
+    }
+
+    for (uint32_t hand = 0; hand < SIDE_COUNT; ++hand) {
+        XrSpaceLocation spaceLocation = {
+            .type = XR_TYPE_SPACE_LOCATION};
+        result = xrLocateSpace(program->input.handSpace[hand], program->space, dt, &spaceLocation);
+        CHECKXR(result, "Failed to locate hand space %u", hand);
+        if (XR_UNQUALIFIED_SUCCESS(result)) {
+            if ((spaceLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
+                (spaceLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
+                float scale = 0.1f * program->input.handScale[hand];
+                cubes[cubeCount++] = (Cube){
+                    .pose = spaceLocation.pose,
+                    .scale = {scale, scale, scale}};
+            }
+        } else {
+            if (program->input.handActive[hand] == XR_TRUE) {
+                CTRACE("Unable to locate visualized ref hand space %u [code: %d]", hand, result);
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < viewCount; ++i) {
+        XrSwapchainImageAcquireInfo acquireInfo = {
+            .type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+
+        uint32_t image;
+        result = xrAcquireSwapchainImage(program->swapchains[i].handle, &acquireInfo, &image);
+        CHECKXR(result, "Faield to acquire next image %u", i);
+
+        XrSwapchainImageWaitInfo waitInfo = {
+            .type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO,
+            .timeout = XR_INFINITE_DURATION};
+        result = xrWaitSwapchainImage(program->swapchains[i].handle, &waitInfo);
+        CHECKXR(result, "Failed to wait for image %u", i);
+
+        views[i] = (XrCompositionLayerProjectionView){
+            .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW,
+            .pose = program->views[i].pose,
+            .fov = program->views[i].fov,
+            .subImage = (XrSwapchainSubImage){
+                .swapchain = program->swapchains[i].handle,
+                .imageRect = (XrRect2Di){
+                    {0, 0},
+                    {program->swapchains[i].width, program->swapchains[i].height}}}};
+
+        if (!vulkan_render_view(vulkan, views[i], i, image, cubes, cubeCount)) {
+            CERROR("Faield to render view %u", i);
+            return false;
+        }
+
+        XrSwapchainImageReleaseInfo releaseInfo = {
+            .type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        result = xrReleaseSwapchainImage(program->swapchains[i].handle, &releaseInfo);
+        CHECKXR(result, "Faield to release image %u", i);
+    }
+
+    layer->type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+    layer->space = program->space;
+    layer->viewCount = viewCount;
+    layer->views = views;
+    layer->layerFlags = 0;
+    return true;
 }
 
 static bool program_render_frame(OpenXrProgram* program, VulkanState* vulkan) {
-    // TODO: program->RenderFrame();
+    XrFrameWaitInfo waitInfo = {
+        .type = XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState frameState = {
+        .type = XR_TYPE_FRAME_STATE};
+
+    XrResult result = xrWaitFrame(program->session, &waitInfo, &frameState);
+    CHECKXR(result, "Failed to wait for frame");
+
+    XrFrameBeginInfo frameBegin = {
+        .type = XR_TYPE_FRAME_BEGIN_INFO};
+    result = xrBeginFrame(program->session, &frameBegin);
+    CHECKXR(result, "Failed to begin frame");
+
+    XrCompositionLayerProjection layers[1];
+    XrCompositionLayerProjectionView projectionLayerViews[NUM_VIEWES];
+
+    if (!program_render_layer(
+            program,
+            vulkan,
+            frameState.predictedDisplayTime,
+            projectionLayerViews,
+            array_size(projectionLayerViews),
+            layers)) {
+        CERROR("Failed to render layer");
+        return false;
+    }
+
+    const XrCompositionLayerBaseHeader* ppLayers = layers;
+
+    XrFrameEndInfo frameEndInfo = {
+        .type = XR_TYPE_FRAME_END_INFO,
+        .displayTime = frameState.predictedDisplayTime,
+        .environmentBlendMode = program->environmentBlendMode,
+        .layerCount = 1,
+        .layers = &ppLayers};
+    result = xrEndFrame(program->session, &frameEndInfo);
+    CHECKXR(result, "Failed to end frame");
+    return true;
 }
 
 void android_main(struct android_app* app) {
@@ -1822,7 +2385,7 @@ void android_main(struct android_app* app) {
             .type = XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR,
             .applicationVM = app->activity->vm,
             .applicationContext = app->activity->clazz};
-        xrResult = initializeLoader(&loaderInitInfoAndroid);
+        xrResult = initializeLoader((const XrLoaderInitInfoBaseHeaderKHR*)&loaderInitInfoAndroid);
     }
 
     bool result = false;
@@ -1864,7 +2427,10 @@ void android_main(struct android_app* app) {
                 exitRenderLoop = true;
             }
 
-            // TODO: program->RenderFrame();
+            if (!program_render_frame(&program, &vulkan)) {
+                CERROR("Failed to render frame");
+                exitRenderLoop = true;
+            }
         }
     }
 
