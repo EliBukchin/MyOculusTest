@@ -105,10 +105,6 @@ typedef struct SwapchainImageContext {
     XrStructureType swapchainImageType;
 } SwapchainImageContext;
 
-typedef struct ShaderProgram {
-    VkPipelineShaderStageCreateInfo shaderInfo[NUM_PIPELINE_STAGES];
-} ShaderProgram;
-
 typedef enum CmdBufferState {
     CBR_STATE_Undefined,
     CBR_STATE_Initialized,
@@ -524,10 +520,9 @@ typedef struct VulkanState {
     VkDevice device;
     uint32_t queueFamilyIndex;  // NOTE: Graphics queue
     VkQueue queue;
-    VkSemaphore drawDone;
 
     VkPhysicalDeviceMemoryProperties memProps;
-    ShaderProgram shaderProgram;
+    VkPipelineShaderStageCreateInfo shaderProgram[NUM_PIPELINE_STAGES];
     CmdBuffer cmdBuffer;
     VkPipelineLayout pipelineLayout;
     VertexBuffer drawBuffer;
@@ -743,7 +738,7 @@ static bool vulkan_buffer_update(VkDevice device, VkDeviceMemory mem, size_t siz
 }
 
 static bool vulkan_initialize_resources(VulkanState* vulkan) {
-    vulkan->shaderProgram.shaderInfo[0] = (VkPipelineShaderStageCreateInfo){
+    vulkan->shaderProgram[0] = (VkPipelineShaderStageCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .pName = "main",
         .stage = VK_SHADER_STAGE_VERTEX_BIT,
@@ -753,10 +748,10 @@ static bool vulkan_initialize_resources(VulkanState* vulkan) {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .pCode = vertSpv,
         .codeSize = sizeof(vertSpv)};
-    VkResult result = vkCreateShaderModule(vulkan->device, &moduleCI, 0, &vulkan->shaderProgram.shaderInfo[0].module);
+    VkResult result = vkCreateShaderModule(vulkan->device, &moduleCI, 0, &vulkan->shaderProgram[0].module);
     CHECKVK(result, "Failed to create Vertex shader");
 
-    vulkan->shaderProgram.shaderInfo[1] = (VkPipelineShaderStageCreateInfo){
+    vulkan->shaderProgram[1] = (VkPipelineShaderStageCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .pName = "main",
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -764,13 +759,8 @@ static bool vulkan_initialize_resources(VulkanState* vulkan) {
 
     moduleCI.pCode = fragSpv;
     moduleCI.codeSize = sizeof(fragSpv);
-    result = vkCreateShaderModule(vulkan->device, &moduleCI, 0, &vulkan->shaderProgram.shaderInfo[1].module);
+    result = vkCreateShaderModule(vulkan->device, &moduleCI, 0, &vulkan->shaderProgram[1].module);
     CHECKVK(result, "Failed to create Fragment shader");
-
-    VkSemaphoreCreateInfo semaphoreCI = {
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    result = vkCreateSemaphore(vulkan->device, &semaphoreCI, 0, &vulkan->drawDone);
-    CHECKVK(result, "Failed to create Draw Done semaphore");
 
     if (!vulkan_commandbuffer_init(vulkan->device, vulkan->queueFamilyIndex, &vulkan->cmdBuffer)) {
         CERROR("Failed to initialize commandbuffer");
@@ -1642,8 +1632,8 @@ static bool vulkan_pipeline_create(VulkanState* vulkan, VkExtent2D extent, Rende
 
     VkGraphicsPipelineCreateInfo pipeCI = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .stageCount = array_size(vulkan->shaderProgram.shaderInfo),
-        .pStages = vulkan->shaderProgram.shaderInfo,
+        .stageCount = array_size(vulkan->shaderProgram),
+        .pStages = vulkan->shaderProgram,
         .pVertexInputState = &vertexInputCI,
         .pInputAssemblyState = &inputAssembleCI,
         .pTessellationState = 0,
@@ -2343,6 +2333,72 @@ static bool program_render_frame(OpenXrProgram* program, VulkanState* vulkan) {
     return true;
 }
 
+#define VKDESTROY(cmd, item)          \
+    if (item) {                       \
+        cmd(vulkan->device, item, 0); \
+        item = 0;                     \
+    }
+
+static void vulkan_cleanup(VulkanState* vulkan) {
+    for (uint32_t view = 0; view < NUM_VIEWES; ++view) {
+        for (uint32_t image = 0; image < vulkan->swapchainImageContext[view].imageCount; ++image) {
+            VKDESTROY(vkDestroyFramebuffer, vulkan->swapchainImageContext[view].renderTarget[image].fb);
+            VKDESTROY(vkDestroyImageView, vulkan->swapchainImageContext[view].renderTarget[image].colorView);
+            VKDESTROY(vkDestroyImageView, vulkan->swapchainImageContext[view].renderTarget[image].depthView);
+        }
+
+        VKDESTROY(vkDestroyImage, vulkan->swapchainImageContext[view].depthBuffer.depthImage);
+        VKDESTROY(vkFreeMemory, vulkan->swapchainImageContext[view].depthBuffer.depthMemory);
+        VKDESTROY(vkDestroyRenderPass, vulkan->swapchainImageContext[view].rp.pass);
+    }
+    if (vulkan->cmdBuffer.buf) {
+        vkFreeCommandBuffers(vulkan->device, vulkan->cmdBuffer.pool, 1, &vulkan->cmdBuffer.buf);
+        vulkan->cmdBuffer.buf = 0;
+    }
+    VKDESTROY(vkDestroyCommandPool, vulkan->cmdBuffer.pool);
+    VKDESTROY(vkDestroyFence, vulkan->cmdBuffer.execFence);
+    VKDESTROY(vkDestroyPipelineLayout, vulkan->pipelineLayout);
+    VKDESTROY(vkDestroyShaderModule, vulkan->shaderProgram[0].module);
+    VKDESTROY(vkDestroyShaderModule, vulkan->shaderProgram[1].module);
+    VKDESTROY(vkDestroyBuffer, vulkan->drawBuffer.idxBuf);
+    VKDESTROY(vkDestroyBuffer, vulkan->drawBuffer.vtxBuf);
+    VKDESTROY(vkFreeMemory, vulkan->drawBuffer.idxMem);
+    VKDESTROY(vkFreeMemory, vulkan->drawBuffer.vtxMem);
+}
+
+static void program_cleanup(OpenXrProgram* program) {
+    if (program->input.actionsSet) {
+        for (uint32_t side = 0; side < SIDE_COUNT; ++side) {
+            xrDestroySpace(program->input.handSpace[side]);
+        }
+        xrDestroyActionSet(program->input.actionsSet);
+    }
+
+    for (uint32_t view = 0; view < NUM_VIEWES; ++view) {
+        if (program->swapchains[view].handle) {
+            xrDestroySwapchain(program->swapchains[view].handle);
+        }
+    }
+
+    for (uint32_t space = 0; space < array_size(VISULAIZED_SPACES); ++space) {
+        if (program->visualizedSpaces[space]) {
+            xrDestroySwapchain(program->visualizedSpaces[space]);
+        }
+    }
+
+    if (program->space) {
+        xrDestroySpace(program->space);
+    }
+
+    if (program->session) {
+        xrDestroySession(program->session);
+    }
+
+    if (program->instance) {
+        xrDestroyInstance(program->instance);
+    }
+}
+
 void android_main(struct android_app* app) {
     JNIEnv* env;
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &env, 0);
@@ -2434,6 +2490,7 @@ void android_main(struct android_app* app) {
         }
     }
 
-    // TODO: cleanup
+    vulkan_cleanup(&vulkan);
+    program_cleanup(&program);
     (*app->activity->vm)->DetachCurrentThread(app->activity->vm);
 }
