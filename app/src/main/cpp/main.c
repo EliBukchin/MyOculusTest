@@ -89,11 +89,6 @@ typedef struct RenderPass {
     VkRenderPass pass;
 } RenderPass;
 
-typedef struct Pipeline {
-    VkPipeline pipe;
-    VkPrimitiveTopology topology;
-} Pipeline;
-
 typedef struct SwapchainImageContext {
     XrSwapchainImageVulkan2KHR swapchainImages[MAX_IMAGES];
     RenderTarget renderTarget[MAX_IMAGES];
@@ -101,7 +96,8 @@ typedef struct SwapchainImageContext {
     VkExtent2D size;
     DepthBuffer depthBuffer;
     RenderPass rp;
-    Pipeline pipe;
+    VkPipeline pipe;
+    VkPrimitiveTopology topology;
     XrStructureType swapchainImageType;
 } SwapchainImageContext;
 
@@ -1363,12 +1359,12 @@ static XrReferenceSpaceCreateInfo program_ref_space_ci(char* ref) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
         result.poseInReferenceSpace = pose_rotateCCW_about_Yaxis(
             3.14f / 3.0f,
-            (XrVector3f){-2.f, 0.f, -2.f});
+            (XrVector3f){-2.f, 0.5f, -2.f});
     } else if (strcasecmp(ref, "StageRightRotated") == 0) {
         result.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
         result.poseInReferenceSpace = pose_rotateCCW_about_Yaxis(
             -3.14f / 3.0f,
-            (XrVector3f){2.f, 0.f, -2.f});
+            (XrVector3f){2.f, 0.5f, -2.f});
     } else {
         result.type = XR_TYPE_UNKNOWN;
     }
@@ -1545,7 +1541,7 @@ static bool vulkan_render_pass_create(VulkanState* vulkan, VkFormat color, VkFor
     return true;
 }
 
-static bool vulkan_pipeline_create(VulkanState* vulkan, VkExtent2D extent, RenderPass* rp, Pipeline* pipe) {
+static bool vulkan_pipeline_create(VulkanState* vulkan, VkExtent2D extent, RenderPass* rp, VkPrimitiveTopology topology, VkPipeline* pipe) {
     VkPipelineVertexInputStateCreateInfo vertexInputCI = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
@@ -1556,7 +1552,7 @@ static bool vulkan_pipeline_create(VulkanState* vulkan, VkExtent2D extent, Rende
     VkPipelineInputAssemblyStateCreateInfo inputAssembleCI = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .primitiveRestartEnable = VK_FALSE,
-        .topology = pipe->topology,
+        .topology = topology,
     };
 
     VkPipelineRasterizationStateCreateInfo raserizerCI = {
@@ -1645,7 +1641,7 @@ static bool vulkan_pipeline_create(VulkanState* vulkan, VkExtent2D extent, Rende
         .layout = vulkan->pipelineLayout,
         .renderPass = rp->pass,
         .subpass = 0};
-    VkResult result = vkCreateGraphicsPipelines(vulkan->device, 0, 1, &pipeCI, 0, &pipe->pipe);
+    VkResult result = vkCreateGraphicsPipelines(vulkan->device, 0, 1, &pipeCI, 0, pipe);
     CHECKVK(result, "Failed to create Pipeline");
     return true;
 }
@@ -1669,7 +1665,7 @@ static XrSwapchainImageBaseHeader* vulkan_allocate_swapchain_images(VulkanState*
         return 0;
     }
 
-    if (!vulkan_pipeline_create(vulkan, this->size, &this->rp, &this->pipe)) {
+    if (!vulkan_pipeline_create(vulkan, this->size, &this->rp, this->topology, &this->pipe)) {
         CERROR("Faield to creaate pipeline, View[%u] ", viewID);
         return 0;
     }
@@ -2128,7 +2124,7 @@ static bool vulkan_render_view(VulkanState* vulkan, XrCompositionLayerProjection
             .extent = context->size}};
 
     vkCmdBeginRenderPass(vulkan->cmdBuffer.buf, &rpBI, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(vulkan->cmdBuffer.buf, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipe.pipe);
+    vkCmdBindPipeline(vulkan->cmdBuffer.buf, VK_PIPELINE_BIND_POINT_GRAPHICS, context->pipe);
     vkCmdBindIndexBuffer(vulkan->cmdBuffer.buf, vulkan->drawBuffer.idxBuf, 0, VK_INDEX_TYPE_UINT16);
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(vulkan->cmdBuffer.buf, 0, 1, &vulkan->drawBuffer.vtxBuf, &offset);
@@ -2418,7 +2414,7 @@ void android_main(struct android_app* app) {
 
     VulkanState vulkan = {};
     for (uint32_t i = 0; i < NUM_VIEWES; ++i) {
-        vulkan.swapchainImageContext[i].pipe.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        vulkan.swapchainImageContext[i].topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         vulkan.swapchainImageContext[i].swapchainImageType = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR;
         vulkan.swapchainImageContext[i].depthBuffer.vkLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     }
